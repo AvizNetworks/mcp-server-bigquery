@@ -55,11 +55,19 @@ class BigQueryDatabase:
                 raise ValueError(f"Invalid credentials JSON: {e}")
         elif key_file:
             try:
-                credentials_path = key_file
-                credentials = service_account.Credentials.from_service_account_file(
-                    credentials_path,
+                # Read and parse the key file manually to handle various formats
+                with open(key_file, 'r', encoding='utf-8-sig') as f:
+                    key_content = f.read()
+                # Strip BOM and replace non-breaking spaces with regular spaces
+                key_content = key_content.strip().lstrip('\ufeff')
+                key_content = key_content.replace('\xa0', ' ')  # Non-breaking space to regular space
+                logger.debug(f"Key file first 50 chars: {repr(key_content[:50])}")
+                credentials_info = json.loads(key_content)
+                credentials = service_account.Credentials.from_service_account_info(
+                    credentials_info,
                     scopes=["https://www.googleapis.com/auth/cloud-platform"],
                 )
+                logger.info("Using credentials from key file")
             except Exception as e:
                 logger.error(f"Error loading service account credentials: {e}")
                 raise ValueError(f"Invalid key file: {e}")
