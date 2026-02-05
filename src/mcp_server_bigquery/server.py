@@ -1,11 +1,17 @@
 from google.cloud import bigquery
 from google.oauth2 import service_account
 import logging
+import json
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
+from mcp.server.sse import SseServerTransport
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.responses import Response
 from typing import Any, Optional
+import uvicorn
 
 # Set up logging to both stdout and file
 logger = logging.getLogger('mcp_bigquery_server')
@@ -27,16 +33,27 @@ logger.setLevel(logging.DEBUG)
 logger.info("Starting MCP BigQuery Server")
 
 class BigQueryDatabase:
-    def __init__(self, project: str, location: str, key_file: Optional[str], datasets_filter: list[str]):
+    def __init__(self, project: str, location: str, key_file: Optional[str], credentials_json: Optional[str], datasets_filter: list[str]):
         """Initialize a BigQuery database client"""
         logger.info(f"Initializing BigQuery client for project: {project}, location: {location}, key_file: {key_file}")
         if not project:
             raise ValueError("Project is required")
         if not location:
             raise ValueError("Location is required")
-        
+
         credentials: service_account.Credentials | None = None
-        if key_file:
+        if credentials_json:
+            try:
+                credentials_info = json.loads(credentials_json)
+                credentials = service_account.Credentials.from_service_account_info(
+                    credentials_info,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+                logger.info("Using credentials from BIGQUERY_CREDENTIALS environment variable")
+            except Exception as e:
+                logger.error(f"Error loading service account credentials from JSON: {e}")
+                raise ValueError(f"Invalid credentials JSON: {e}")
+        elif key_file:
             try:
                 credentials_path = key_file
                 credentials = service_account.Credentials.from_service_account_file(
@@ -108,10 +125,11 @@ class BigQueryDatabase:
             bigquery.ScalarQueryParameter("table_name", "STRING", table_id),
         ])
 
-async def main(project: str, location: str, key_file: Optional[str], datasets_filter: list[str]):
+def create_server(project: str, location: str, key_file: Optional[str], credentials_json: Optional[str], datasets_filter: list[str]):
+    """Create and configure the MCP server with BigQuery tools."""
     logger.info(f"Starting BigQuery MCP Server with project: {project} and location: {location}")
 
-    db = BigQueryDatabase(project, location, key_file, datasets_filter)
+    db = BigQueryDatabase(project, location, key_file, credentials_json, datasets_filter)
     server = Server("bigquery-manager")
 
     # Register handlers
@@ -180,17 +198,65 @@ async def main(project: str, location: str, key_file: Optional[str], datasets_fi
         except Exception as e:
             return [types.TextContent(type="text", text=f"Error: {str(e)}")]
 
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        logger.info("Server running with stdio transport")
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="bigquery",
-                server_version="0.3.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
+    return server
+
+
+async def main(project: str, location: str, key_file: Optional[str], credentials_json: Optional[str], datasets_filter: list[str], transport: str = "stdio", port: int = 8000):
+    """Main entry point supporting both stdio and SSE transports."""
+    server = create_server(project, location, key_file, credentials_json, datasets_filter)
+
+    if transport == "sse":
+        logger.info(f"Starting SSE server on port {port}")
+        sse = SseServerTransport("/messages/")
+
+        async def handle_sse(request):
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await server.run(
+                    streams[0],
+                    streams[1],
+                    InitializationOptions(
+                        server_name="bigquery",
+                        server_version="0.3.0",
+                        capabilities=server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
+                    ),
+                )
+            return Response()
+
+        async def handle_health(request):
+            return Response(content="OK", media_type="text/plain")
+
+        from starlette.routing import Mount
+
+        app = Starlette(
+            debug=True,
+            routes=[
+                Route("/sse", endpoint=handle_sse),
+                Route("/health", endpoint=handle_health),
+                Mount("/messages", app=sse.handle_post_message),
+            ],
         )
+
+        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+        server_instance = uvicorn.Server(config)
+        await server_instance.serve()
+    else:
+        # Default to stdio transport
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            logger.info("Server running with stdio transport")
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="bigquery",
+                    server_version="0.3.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                ),
+            )

@@ -8,19 +8,17 @@ WORKDIR /app
 # Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1
 
-# Copy pyproject.toml and lock file for dependencies
-COPY pyproject.toml uv.lock ./
+# Copy pyproject.toml, lock file, and README for dependencies
+COPY pyproject.toml uv.lock README.md ./
 
 # Install the project's dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev --no-editable
+RUN uv sync --frozen --no-install-project --no-dev --no-editable
 
 # Add the rest of the project source code and install it
 ADD src /app/src
 
 # Sync and install the project
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.13-slim-bookworm
 
@@ -28,14 +26,16 @@ FROM python:3.13-slim-bookworm
 WORKDIR /app
 
 # Copy virtual environment from the builder
-COPY --from=uv /root/.local /root/.local
-COPY --from=uv --chown=app:app /app/.venv /app/.venv
+COPY --from=uv /app/.venv /app/.venv
 
 # Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Expose port for SSE transport
+EXPOSE 8000
+
 # Define the entry point
 ENTRYPOINT ["mcp-server-bigquery"]
 
-# Example command
-# CMD ["--project", "your-gcp-project-id", "--location", "your-gcp-location"]
+# Default to SSE transport on port 8000
+CMD ["--transport", "sse", "--port", "8000"]
