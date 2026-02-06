@@ -248,6 +248,7 @@ async def main(project: str, location: str, key_file: Optional[str], credentials
             ],
         )
 
+        logger.info(f"Starting HTTP server on port {port}")
         config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
         server_instance = uvicorn.Server(config)
         await server_instance.serve()
